@@ -25,14 +25,23 @@ use constant DEFAULT_ADDR    => '127.0.0.1';
 use constant DEFAULT_FAMILY  => 'AF_INET';
 use constant DEFAULT_TIMEOUT => 5;
 
-use constant ALL_GOOD  => '200 OK';
-use constant ENOENT    => '404 Not Found';
-use constant EPERM     => '401';
-use constant MOAR_BUGS => '500';
+use constant HTTP_OK                      => '200 OK';
+use constant E_HTTP_NOT_FOUND             => '404 Not Found';
+use constant E_HTTP_FORBIDDEN             => '403 Forbidden';
+use constant E_HTTP_METHOD_NOT_ALLOWED    => '405 Method Not Allowed';
+use constant E_HTTP_INTERNAL_SERVER_ERROR => '500 Internal Server Error';
 
-#Log::Log4perl->easy_init($DEBUG);
-
-# Will I support changing anything (esp. Port and Addr) after starting up?
+use constant ALLOWED_METHODS => {
+    'GET'     => 1,
+    'HEAD'    => 1,
+    'POST'    => 0,
+    'PUT'     => 0,
+    'DELETE'  => 0,
+    'CONNECT' => 0,
+    'OPTIONS' => 0,
+    'TRACE'   => 0,
+    'PATCH'   => 0
+};
 
 # Address to listen on
 # IPv6 support may never happen
@@ -102,6 +111,11 @@ sub debug {
     my ( $self, $function, $message ) = @_;
     $self->logger->debug(
         sprintf( "%s::%s %s", $self->meta->name, $function, $message ) );
+}
+
+sub me {
+    my $self = shift;
+    $self->meta->name . "/$VERSION perl/$^V ($^O)";
 }
 
 sub BUILD {
@@ -194,10 +208,113 @@ sub std_headers {
     $self->print_client(
         $client,
         [   'Date: ' . time2str( time() ),
-            'Server: ' . $self->meta->name . "/$VERSION perl/$^V ($^O)",
-            "Content-Type: text/html; charset=utf-8"
+            'Server: ' . $self->meta->name . "/$VERSION perl/$^V ($^O)"
         ]
     );
+}
+
+# Just print all the remaining headers and a blank line
+sub final_headers {
+    my ( $self, $client, $messages_ref ) = @_;
+    push @$messages_ref, '';
+    $self->print_client( $client, $messages_ref );
+}
+
+sub error_page {
+    my ( $self, $client, $error ) = @_;
+
+    $self->final_headers( $client,
+        ['Content-Type: text/html; charset=utf-8'] );
+
+    $self->print_client( $client,
+        [ '<h1>' . $error . '</h1>', '<hr/>', '<i>' . $self->me . '</i>' ] );
+}
+
+sub html_format_dirent {
+    my ( $self, $file, $dirent ) = @_;
+
+    chop $file if ( $file =~ /\/$/ );
+
+    my $actual_file = "$file/$dirent";
+    my $type;
+
+    if    ( -l $actual_file ) { $type = 'l'; }
+    elsif ( -d $actual_file ) { $type = 'd'; }
+    elsif ( -c $actual_file ) { $type = 'c'; }
+    elsif ( -b $actual_file ) { $type = 'b'; }
+    elsif ( -S $actual_file ) { $type = 's'; }
+    elsif ( -p $actual_file ) { $type = '?'; }
+    else                      { $type = '-'; }
+
+    # my $mode = (stat($filename))[2];
+    # printf "Permissions are %04o\n", $mode & 07777;
+    my $perms     = 'notimpyet';
+    my $owner     = 'niy-owner';
+    my $group     = 'niy-group';
+    my $size      = 'niy-size';
+    my $timestamp = 'niy-timestamp';
+    sprintf( "<li><pre> %s%s\t%s\t%s\t%s\t%s\t%s</pre></li>",
+        $type, $perms, $owner, $group, $size, $timestamp, $dirent );
+}
+
+sub directory_page {
+    my ( $self, $client, $file ) = @_;
+    $self->final_headers( $client,
+        ['Content-Type: text/html; charset=utf-8'] );
+
+    my $dh = DirHandle->new($file);
+    if ( defined $dh ) {
+        $self->print_client( $client, ['<ul>'] );
+        while ( defined( my $dirent = $dh->read ) ) {
+            my $stat = stat($dirent);
+            $self->print_client( $client,
+                [ $self->html_format_dirent( $file, $dirent ) ] );
+        }
+        $self->print_client( $client, ['</ul>'] );
+
+        undef $dh;
+    }
+    else {
+        $self->print_client( $client,
+            ["<h1>Something went wrong opening $file</h1>"] );
+    }
+}
+
+sub file_page {
+    my ( $self, $client, $file ) = @_;
+
+    $self->final_headers( $client,
+        ['Content-Type: text/html; charset=utf-8'] );
+    $self->print_client(
+        $client,
+        [   "<h1>You have requested $file</h1>",
+            '<p>This has not been implemented yet.</p>'
+        ]
+    );
+}
+
+sub normal_page {
+    my ( $self, $client, $file ) = @_;
+
+    # We can add more headers into this if need be
+    # And alter this if we decide to display non-html media
+
+    if ( -f $file ) {
+        $self->file_page( $client, $file );
+    }
+    elsif ( -d $file ) {
+        $self->directory_page( $client, $file );
+    }
+    else {
+        $self->final_headers( $client,
+            ['Content-Type: text/html; charset=utf-8'] );
+        $self->print_client(
+            $client,
+            [   "<h1>You have requested $file</h1>",
+                '<p>Sadly, it is is neither a regular file nor a directory.</p>'
+            ]
+        );
+    }
 }
 
 sub respond {
@@ -208,26 +325,40 @@ sub respond {
     $self->debug( 'respond',
         $self->get_dir . $self->get_request->get_location );
 
-    my $stat   = stat($file);
-    my $status = $self->get_request->get_protocol . ' ';
-    $status .=
-        ($stat)
-        ? And::WebServer::ALL_GOOD
-        : And::WebServer::ENOENT;
-    $self->print_client( $client, [ $status ] );
-    $self->std_headers($client);
+    my $stat        = stat($file);
+    my $state       = 0;
+    my $status_line = $self->get_request->get_protocol . ' ';
+    if ( ALLOWED_METHODS->{ $self->get_request->get_verb } ) {
+        if ($stat) {
+            $state = And::WebServer::HTTP_OK;
+        }
+        else {
+            $state = And::WebServer::E_HTTP_NOT_FOUND;
+        }
+    }
+    else {
+        $state = And::WebServer::E_HTTP_METHOD_NOT_ALLOWED;
+    }
 
-    $self->print_client( $client, [''] );
-    print $client '<h1>WAT</h1>' . "\n";
-    $self->print_client( $client, [''] );
+    $status_line .= $state;
+    $self->print_client( $client, [$status_line] );
+    $self->std_headers($client);
+    if ( $state eq And::WebServer::HTTP_OK ) {
+        $self->normal_page( $client, $file );
+    }
+    else {
+        $self->error_page( $client, $state );
+    }
 }
 
 sub the_method_header {
     my ( $self, $message ) = @_;
 
     my @words = split( / /, $message );
+
     if ( $#words == 2 ) {
-        $self->debug( 'the_method_header', "GET RECEIVED FOR $words[1]" );
+        $self->debug( 'the_method_header',
+            "$words[0] RECEIVED FOR $words[1]" );
         $self->get_request->set_verb( $words[0] );
         $self->get_request->set_location( $words[1] );
         $self->get_request->set_protocol( $words[2] );
@@ -286,17 +417,19 @@ sub client_message {
     # process $message
     $self->debug( 'client_message', "Received message: '${message}'" );
 
-    # FIXME
-    # if $message =~ And::WebServer::Request::ALLOWED_METHOD
-    # Add rejection of other verbs
-    if ( $message =~ /^(GET|HEAD) / ) {
+    my ($first) = split / /, $message;
+    if ( not defined $first ) {
+
+        # Blank line, means the split on $message doesn't define £first
+        $self->the_blank_line($client);
+    }
+    elsif ( exists( ALLOWED_METHODS->{$first} ) ) {
+
+        # Matched a know http method
         $self->the_method_header($message);
     }
-    elsif ( $message =~ /^Host: / ) {
+    elsif ( $first eq 'Host:' ) {
         $self->the_host_header($message);
-    }
-    elsif ( $message eq '' ) {
-        $self->the_blank_line($client);
     }
     else {
         # Some other header received.

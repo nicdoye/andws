@@ -5,8 +5,7 @@ use 5.10.0;
 
 package And::WebServer::Request;
 use Moose;
-use constant ALLOWED_METHOD => 'GET';
-use constant OTHER_HEADER   => 'Host:';
+use constant OTHER_HEADER => 'Host:';
 
 has 'verb' => (
     is      => 'rw',
