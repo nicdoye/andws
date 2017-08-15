@@ -4,11 +4,11 @@ Another Dumb Web Server
 
 ## Really Dumb
 
-This isn't the sort of thing I would ever expect anyone to use, but it demonstrates what can be done in some simple Perl.
+This isn't the sort of thing I would ever expect anyone to use, but it demonstrates what can be done in some simple Perl. It's not rigorous (you could easily confuse it) or RFC compliant in any way.
 
 ## What is it?
 
-It's another simple "run in place" web server. 
+It's another simple "run in place" web server.
 
 ## Usage
 
