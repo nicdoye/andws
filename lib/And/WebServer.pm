@@ -344,9 +344,6 @@ sub file_page {
     my $mime_type    = mimetype($file);
     my $content_type = $self->content_type($file);
 
-    # Charset may not be right.
-    $self->final_headers( $client, ["Content-Type: $content_type"] );
-
     #my $fh = FileHandle->new( $file, 'r' );
     my $fh = IO::File->new( $file, 'r' );
     $fh->binmode;
@@ -354,7 +351,7 @@ sub file_page {
         $self->final_headers( $client, ["Content-Type: $content_type"] );
 
         while (<$fh>) {
-            $self->print_client( $client, [$_] );
+            $self->print_client_raw( $client, [$_] );
         }
         $fh->close;
     }
@@ -365,13 +362,6 @@ sub file_page {
             ['<h1>Something went wrong reading the file</h1>'] );
 
     }
-
-#$self->print_client(
-#    $client,
-#    [   "<h1>You have requested $file of type $mime_type or $content_type</h1>",
-#        '<p>This has not been implemented yet.</p>'
-#    ]
-#);
 }
 
 sub normal_page {
