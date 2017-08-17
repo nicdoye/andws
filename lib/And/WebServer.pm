@@ -10,7 +10,6 @@ use DirHandle;
 use Fcntl qw/:mode/;
 use File::stat;
 use File::MimeInfo::Magic;
-use FileHandle;
 use HTTP::Date;
 use IO::File;
 use Moose;
@@ -23,12 +22,12 @@ use experimental qw/switch/;
 
 # Version numbers. I love version numbers.
 use vars qw($VERSION);
-$VERSION = '0.002';
+$VERSION = '0.005';
 
 use constant DEFAULT_PORT    => 1444;
 use constant DEFAULT_ADDR    => '127.0.0.1';
 use constant DEFAULT_FAMILY  => 'AF_INET';
-use constant DEFAULT_TIMEOUT => 5;
+use constant DEFAULT_TIMEOUT => 1;
 
 use constant HTTP_OK                      => '200 OK';
 use constant E_HTTP_NOT_FOUND             => '404 Not Found';
@@ -72,12 +71,12 @@ has 'port' => (
 
 # Directory to serve
 # Is '.' the right value really?
-has 'dir' => (
+has 'document_root' => (
     is      => 'rw',
     isa     => 'Str',
     default => '.',
-    reader  => 'get_dir',
-    writer  => 'set_dir'
+    reader  => 'get_document_root',
+    writer  => 'set_document_root'
 );
 
 # Have I bound to the port properly?
@@ -281,11 +280,19 @@ sub file_perms {
 }
 
 sub html_format_dirent {
-    my ( $self, $file, $dirent ) = @_;
+    my ( $self, $dir, $dirent ) = @_;
 
-    chop $file if ( $file =~ /\/$/ );
+    chop $dir if ( $dir =~ /\/$/ );
 
-    my $actual_file = "$file/$dirent";
+    my $actual_file = "$dir/$dirent";
+    my $link_file   = $actual_file;
+
+    # Dirty hack
+    my $root_dir_for_regex = $self->get_document_root;
+    $link_file =~ s/^${root_dir_for_regex}//;
+
+    $self->debug( 'html_format_dirent',
+        $self->get_document_root . " $dir $dirent" );
 
     my $stat = stat($actual_file);
 
@@ -297,19 +304,19 @@ sub html_format_dirent {
     my $size  = $stat->size;
     my $mtime = $stat->mtime;
 
-    sprintf(
-        "<li><pre>%s\t%s\t%s\t%s\t%s\t<a href='$dirent'>%s</a></pre></li>",
-        $permstring, $owner, $group, $size, ctime($mtime), $dirent );
+    sprintf( "<li><pre>%s\t%s\t%s\t%s\t%s\t<a href='%s'>%s</a></pre></li>",
+        $permstring, $owner, $group, $size, ctime($mtime), $link_file,
+        $dirent );
 }
 
 sub directory_page {
     my ( $self, $client, $dirname ) = @_;
-    $self->final_headers( $client,
-        ['Content-Type: text/html; charset=utf-8'] );
 
     # FIXME - no permissions check
     my $dh = DirHandle->new($dirname);
     if ( defined $dh ) {
+        $self->final_headers( $client,
+            ['Content-Type: text/html; charset=utf-8'] );
         $self->print_client( $client, ['<ul>'] );
         while ( defined( my $dirent = $dh->read ) ) {
             my $stat = stat($dirent);
@@ -321,8 +328,9 @@ sub directory_page {
         undef $dh;
     }
     else {
-        $self->print_client( $client,
-            ["<h1>Something went wrong opening $dirname</h1>"] );
+        # FIXME - this error is too generic.
+        $self->error_page( $client,
+            And::WebServer::E_HTTP_INTERNAL_SERVER_ERROR );
     }
 }
 
@@ -344,10 +352,9 @@ sub file_page {
     my $mime_type    = mimetype($file);
     my $content_type = $self->content_type($file);
 
-    #my $fh = FileHandle->new( $file, 'r' );
     my $fh = IO::File->new( $file, 'r' );
-    $fh->binmode;
     if ( defined $fh ) {
+        $fh->binmode;
         $self->final_headers( $client, ["Content-Type: $content_type"] );
 
         while (<$fh>) {
@@ -356,11 +363,9 @@ sub file_page {
         $fh->close;
     }
     else {
-        $self->final_headers( $client,
-            ['Content-Type: text/html; charset=utf-8'] );
-        $self->print_client( $client,
-            ['<h1>Something went wrong reading the file</h1>'] );
-
+        # FIXME - this error is too generic.
+        $self->error_page( $client,
+            And::WebServer::E_HTTP_INTERNAL_SERVER_ERROR );
     }
 }
 
@@ -392,9 +397,9 @@ sub respond {
     my ( $self, $client ) = @_;
 
     # Only tested on UNIX.
-    my $file = $self->get_dir . $self->get_request->get_location;
+    my $file = $self->get_document_root . $self->get_request->get_location;
     $self->debug( 'respond',
-        $self->get_dir . $self->get_request->get_location );
+        $self->get_document_root . $self->get_request->get_location );
 
     my $stat        = stat($file);
     my $state       = 0;

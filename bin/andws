@@ -5,8 +5,5 @@ use warnings;
 
 use And::WebServer;
 
-# Handled by the module. Well they will be.
-#my $port = 1444;
-#my $address = 'localhost';
 
-my $server = And::WebServer->new({ port => 23412, dir => '/tmp' });
+my $server = And::WebServer->new();
