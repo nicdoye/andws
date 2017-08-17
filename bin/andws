@@ -9,4 +9,4 @@ use And::WebServer;
 #my $port = 1444;
 #my $address = 'localhost';
 
-my $server = And::WebServer->new({ port => 23412 });
+my $server = And::WebServer->new({ port => 23412, dir => '/tmp' });

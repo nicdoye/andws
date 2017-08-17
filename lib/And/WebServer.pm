@@ -1,24 +1,29 @@
 use strict;
 use warnings;
 
-use 5.10.0;
+use 5.14.0;
 
 package And::WebServer;
-use Moose;
-use Cwd;
-use File::Stat;
-use HTTP::Date;
-use FileHandle;
-use DirHandle;
-
-# use IO::Socket::INET;
-# Note: Net::Server is GPL'd so we can't use that.
-use Net::Server::NonBlocking;
 use And::WebServer::Request;
+use Cwd;
+use DirHandle;
+use Fcntl qw/:mode/;
+use File::stat;
+use File::MimeInfo::Magic;
+use FileHandle;
+use HTTP::Date;
+use IO::File;
+use Moose;
+use Net::Server::NonBlocking;
+use Time::localtime;
+use User::grent;
+use User::pwent;
+
+use experimental qw/switch/;
 
 # Version numbers. I love version numbers.
 use vars qw($VERSION);
-$VERSION = '0.001';
+$VERSION = '0.002';
 
 use constant DEFAULT_PORT    => 1444;
 use constant DEFAULT_ADDR    => '127.0.0.1';
@@ -188,7 +193,6 @@ sub print_client_raw {
     $self->debug( 'print_client_raw',
         "Messages length: " . $#{$messages_ref} );
     for my $message ( @{$messages_ref} ) {
-        $self->debug( 'print_client_raw', "Sending message: $message" );
         print $client "$message";
     }
 }
@@ -230,45 +234,87 @@ sub error_page {
         [ '<h1>' . $error . '</h1>', '<hr/>', '<i>' . $self->me . '</i>' ] );
 }
 
+sub file_type {
+    my ( $self, $mode ) = @_;
+
+# Other filesystem/OS combinations may support other types of file (e.g. door (D) on Solaris)
+    given ($mode) {
+        'l' when ( S_ISLNK($_) );
+        'd' when ( S_ISDIR($_) );
+        'c' when ( S_ISCHR($_) );
+        'b' when ( S_ISBLK($_) );
+        's' when ( S_ISSOCK($_) );
+        'p' when ( S_ISFIFO($_) );
+        '-' when ( S_ISREG($_) );
+        default { '?'; }
+    }
+}
+
+sub file_perms {
+    my ( $self, $mode ) = @_;
+    my $answer = '---------';
+
+# If anyone can tell me why this doesn't work, I'd love to know. ($_ & S_I*) always fails
+#
+# given ($mode) {
+#     when ( $_ & S_IRUSR ) { substr( $answer, 0, 1 ) = 'r'; continue; }
+#     when ( $_ & S_IWUSR ) { substr( $answer, 1, 1 ) = 'w'; continue; }
+#     when ( $_ & S_IXUSR ) { substr( $answer, 2, 1 ) = 'x'; continue; }
+#     when ( $_ & S_IRGRP ) { substr( $answer, 3, 1 ) = 'r'; continue; }
+#     when ( $_ & S_IWGRP ) { substr( $answer, 4, 1 ) = 'w'; continue; }
+#     when ( $_ & S_IXGRP ) { substr( $answer, 5, 1 ) = 'x'; continue; }
+#     when ( $_ & S_IROTH ) { substr( $answer, 6, 1 ) = 'r'; continue; }
+#     when ( $_ & S_IWOTH ) { substr( $answer, 7, 1 ) = 'w'; continue; }
+#     when ( $_ & S_IXOTH ) { substr( $answer, 8, 1 ) = 'x'; continue; }
+# }
+    if ( $mode & S_IRUSR ) { substr( $answer, 0, 1 ) = 'r'; }
+    if ( $mode & S_IWUSR ) { substr( $answer, 1, 1 ) = 'w'; }
+    if ( $mode & S_IXUSR ) { substr( $answer, 2, 1 ) = 'x'; }
+    if ( $mode & S_IRGRP ) { substr( $answer, 3, 1 ) = 'r'; }
+    if ( $mode & S_IWGRP ) { substr( $answer, 4, 1 ) = 'w'; }
+    if ( $mode & S_IXGRP ) { substr( $answer, 5, 1 ) = 'x'; }
+    if ( $mode & S_IROTH ) { substr( $answer, 6, 1 ) = 'r'; }
+    if ( $mode & S_IWOTH ) { substr( $answer, 7, 1 ) = 'w'; }
+    if ( $mode & S_IXOTH ) { substr( $answer, 8, 1 ) = 'x'; }
+
+    return $answer;
+}
+
 sub html_format_dirent {
     my ( $self, $file, $dirent ) = @_;
 
     chop $file if ( $file =~ /\/$/ );
 
     my $actual_file = "$file/$dirent";
-    my $type;
 
-    if    ( -l $actual_file ) { $type = 'l'; }
-    elsif ( -d $actual_file ) { $type = 'd'; }
-    elsif ( -c $actual_file ) { $type = 'c'; }
-    elsif ( -b $actual_file ) { $type = 'b'; }
-    elsif ( -S $actual_file ) { $type = 's'; }
-    elsif ( -p $actual_file ) { $type = '?'; }
-    else                      { $type = '-'; }
+    my $stat = stat($actual_file);
 
-    # my $mode = (stat($filename))[2];
-    # printf "Permissions are %04o\n", $mode & 07777;
-    my $perms     = 'notimpyet';
-    my $owner     = 'niy-owner';
-    my $group     = 'niy-group';
-    my $size      = 'niy-size';
-    my $timestamp = 'niy-timestamp';
-    sprintf( "<li><pre> %s%s\t%s\t%s\t%s\t%s\t%s</pre></li>",
-        $type, $perms, $owner, $group, $size, $timestamp, $dirent );
+    my $permstring
+        = $self->file_type( $stat->mode ) . $self->file_perms( $stat->mode );
+
+    my $owner = getpwuid( $stat->uid )->name;
+    my $group = getgrgid( $stat->gid )->name;
+    my $size  = $stat->size;
+    my $mtime = $stat->mtime;
+
+    sprintf(
+        "<li><pre>%s\t%s\t%s\t%s\t%s\t<a href='$dirent'>%s</a></pre></li>",
+        $permstring, $owner, $group, $size, ctime($mtime), $dirent );
 }
 
 sub directory_page {
-    my ( $self, $client, $file ) = @_;
+    my ( $self, $client, $dirname ) = @_;
     $self->final_headers( $client,
         ['Content-Type: text/html; charset=utf-8'] );
 
-    my $dh = DirHandle->new($file);
+    # FIXME - no permissions check
+    my $dh = DirHandle->new($dirname);
     if ( defined $dh ) {
         $self->print_client( $client, ['<ul>'] );
         while ( defined( my $dirent = $dh->read ) ) {
             my $stat = stat($dirent);
             $self->print_client( $client,
-                [ $self->html_format_dirent( $file, $dirent ) ] );
+                [ $self->html_format_dirent( $dirname, $dirent ) ] );
         }
         $self->print_client( $client, ['</ul>'] );
 
@@ -276,21 +322,56 @@ sub directory_page {
     }
     else {
         $self->print_client( $client,
-            ["<h1>Something went wrong opening $file</h1>"] );
+            ["<h1>Something went wrong opening $dirname</h1>"] );
+    }
+}
+
+sub content_type {
+    my ( $self, $file ) = @_;
+    my $mime_type = mimetype($file);
+
+    return 'text/plain' unless ( defined $mime_type );
+    given ($mime_type) {
+        'text/html; charset=utf-8' when ('text/html');
+        'text/plain' when {''};
+        default {$mime_type}
     }
 }
 
 sub file_page {
     my ( $self, $client, $file ) = @_;
 
-    $self->final_headers( $client,
-        ['Content-Type: text/html; charset=utf-8'] );
-    $self->print_client(
-        $client,
-        [   "<h1>You have requested $file</h1>",
-            '<p>This has not been implemented yet.</p>'
-        ]
-    );
+    my $mime_type    = mimetype($file);
+    my $content_type = $self->content_type($file);
+
+    # Charset may not be right.
+    $self->final_headers( $client, ["Content-Type: $content_type"] );
+
+    #my $fh = FileHandle->new( $file, 'r' );
+    my $fh = IO::File->new( $file, 'r' );
+    $fh->binmode;
+    if ( defined $fh ) {
+        $self->final_headers( $client, ["Content-Type: $content_type"] );
+
+        while (<$fh>) {
+            $self->print_client( $client, [$_] );
+        }
+        $fh->close;
+    }
+    else {
+        $self->final_headers( $client,
+            ['Content-Type: text/html; charset=utf-8'] );
+        $self->print_client( $client,
+            ['<h1>Something went wrong reading the file</h1>'] );
+
+    }
+
+#$self->print_client(
+#    $client,
+#    [   "<h1>You have requested $file of type $mime_type or $content_type</h1>",
+#        '<p>This has not been implemented yet.</p>'
+#    ]
+#);
 }
 
 sub normal_page {
